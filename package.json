@@ -29,7 +29,7 @@
   },
   "koishi": {
     "description": {
-      "zh": "为 ChatLuna 提供 Napcat 合并转发消息读取、发送与伪造发送工具"
+      "zh": "为 ChatLuna 提供 Napcat 合并转发消息读取、发送与伪造发送工具。使用前请在 chatluna 启用 attachForwardMsgIdToContext，并在 chatluna-character 启用 enableMessageId。"
     },
     "service": {
       "required": [

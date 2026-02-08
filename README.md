@@ -34,6 +34,13 @@
 - `describeImageTool`：图片描述工具配置。
 - `imageService`：图片模型、提示词、并发与超时配置。
 
+## ✅ 使用前置条件
+
+为了让本插件正常读取和发送合并转发消息，请确保你已开启以下选项：
+
+- 在 `chatluna` 插件的“对话行为选项”中启用：`attachForwardMsgIdToContext`。
+- 在 `chatluna-character` 插件的“对话设置”中启用：`enableMessageId`。
+
 ## 🛡️ 使用声明
 
 - 本项目中的伪造身份发送能力仅用于开发测试与娱乐场景。
