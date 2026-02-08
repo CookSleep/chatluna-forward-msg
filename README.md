@@ -1,6 +1,6 @@
 # ChatLuna Forward Msg
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue) ![License](https://img.shields.io/badge/license-GPLv3-brightgreen)
+![Version](https://img.shields.io/badge/version-0.1.2-blue) ![License](https://img.shields.io/badge/license-GPLv3-brightgreen)
 
 为 Koishi ChatLuna 提供 Napcat 合并转发消息的 **读取**、**发送**、**伪造发送** 与 **图片描述** 工具，便于在聊天场景中自动处理复杂消息内容。
 
