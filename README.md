@@ -1,6 +1,6 @@
 # ChatLuna Forward Msg
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue) ![License](https://img.shields.io/badge/license-AGPLv3-brightgreen)
+![Version](https://img.shields.io/badge/version-0.1.0-blue) ![License](https://img.shields.io/badge/license-GPLv3-brightgreen)
 
 为 Koishi ChatLuna 提供 Napcat 合并转发消息的 **读取**、**发送**、**伪造发送** 与 **图片描述** 工具，便于在聊天场景中自动处理复杂消息内容。
 
@@ -9,7 +9,7 @@
 ### 1. 📥 读取合并转发消息
 - 支持读取 Napcat 合并转发消息并解析节点内容。
 - 支持嵌套解析（可配置最大解析层数）。
-- 支持在读取过程中对图片进行自动描述，输出更适合模型消费的文本结果。
+- 支持在读取过程中对图片进行自动描述，输出更适合模型阅读的 JSON。
 
 ### 2. 📤 发送合并转发消息
 - 支持以 Bot 身份发送合并转发消息。
@@ -25,14 +25,6 @@
 - 支持按图片 URL 直接生成描述。
 - 可附加描述要求（requirement）。
 - 可配置并发与请求超时参数。
-
-## 🚀 安装方法
-
-1. 将本项目放入 Koishi 插件目录（如 `plugins/chatluna-forward-msg`）。
-2. 确保已安装并启用：
-   - `koishi-plugin-chatluna`
-   - Napcat / OneBot 适配环境
-3. 在 Koishi 中加载本插件并按需配置工具开关与模型参数。
 
 ## ⚙️ 主要配置
 
