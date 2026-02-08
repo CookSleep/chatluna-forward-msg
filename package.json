@@ -2,6 +2,24 @@
   "name": "koishi-plugin-chatluna-forward-msg",
   "description": "ChatLuna tools for reading and sending Napcat forward messages",
   "version": "0.1.0",
+  "homepage": "https://github.com/CookSleep/chatluna-forward-msg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CookSleep/chatluna-forward-msg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CookSleep/chatluna-forward-msg/issues"
+  },
+  "keywords": [
+    "koishi",
+    "chatluna",
+    "napcat",
+    "onebot",
+    "forward-message"
+  ],
+  "contributors": [
+    "CookSleep"
+  ],
   "main": "lib/index.cjs",
   "type": "commonjs",
   "license": "GPL-3.0-only",
