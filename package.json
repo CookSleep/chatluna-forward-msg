@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chatluna-forward-msg",
   "description": "ChatLuna tools for reading and sending Napcat forward messages",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "homepage": "https://github.com/CookSleep/chatluna-forward-msg",
   "repository": {
     "type": "git",
