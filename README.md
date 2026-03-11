@@ -2,15 +2,15 @@
 
 ![npm](https://img.shields.io/npm/v/koishi-plugin-chatluna-forward-msg) ![License](https://img.shields.io/badge/license-GPLv3-brightgreen)
 
-为 Koishi ChatLuna 提供 Napcat 合并转发消息的 **读取**、**发送**、**伪造发送** 与 **图片描述** 工具，便于在聊天场景中自动处理复杂消息内容。
+为 Koishi ChatLuna 提供 OneBot 合并转发消息的 **读取**、**发送**、**伪造发送** 与 **图片描述** 工具，便于在聊天场景中自动处理复杂消息内容。当前支持 `NapCat` 与 `LLBot`（二选一）。
 
 ## ✨ 功能特性
 
 ### 1. 📥 读取合并转发消息
-- 支持读取 Napcat 合并转发消息并解析节点内容。
+- 支持读取 OneBot 合并转发消息并解析节点内容。
 - 支持嵌套解析（可配置最大解析层数）。
 - 支持在读取过程中对图片进行自动描述，输出更适合模型阅读的 JSON。
-- 内置本地缓存服务，默认按 `message_id` 缓存解析结果 1 天，减少重复请求。
+- 内置数据库缓存服务，默认按 `message_id` 缓存解析结果 1 天，减少重复请求。
 
 ### 2. 📤 发送合并转发消息
 - 支持以 Bot 身份发送合并转发消息。
@@ -29,12 +29,13 @@
 
 ## ⚙️ 主要配置
 
+- `protocolService`：协议选择配置。`enableNapcat` 与 `enableLLBot` 必须且只能开启一个，否则会在启动/读取时报错。
 - `readTool`：读取转发消息工具配置。
 - `sendTool`：Bot 身份发送工具配置。
 - `fakeTool`：伪造身份发送工具配置。
 - `describeImageTool`：图片描述工具配置。
 - `imageService`：图片模型、提示词、并发与超时配置。
-- `cacheService`：读取结果缓存配置（默认开启，默认目录 `./data/chatluna-forward-msg-storage`，默认 TTL 1 天）。
+- `cacheService`：读取结果缓存配置（默认开启，默认 TTL 1 天）。`storagePath` 仅用于清理旧版本地缓存目录。
 
 ## ✅ 使用前置条件
 
