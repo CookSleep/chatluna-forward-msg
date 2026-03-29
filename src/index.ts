@@ -1,23 +1,23 @@
-const { Schema } = require('koishi')
-const { z } = require('zod')
-const fs = require('fs/promises')
-const path = require('path')
-const { StructuredTool } = require('@langchain/core/tools')
-const { HumanMessage } = require('@langchain/core/messages')
-const { ChatLunaPlugin } = require('koishi-plugin-chatluna/services/chat')
-const { modelSchema } = require('koishi-plugin-chatluna/utils/schema')
-const {
+import fs from 'fs/promises'
+import path from 'path'
+import { HumanMessage } from '@langchain/core/messages'
+import { StructuredTool } from '@langchain/core/tools'
+import { Schema, type Context } from 'koishi'
+import {
   ModelCapabilities,
   ModelType,
-} = require('koishi-plugin-chatluna/llm-core/platform/types')
-const {
+} from 'koishi-plugin-chatluna/llm-core/platform/types'
+import { ChatLunaPlugin } from 'koishi-plugin-chatluna/services/chat'
+import { createLogger } from 'koishi-plugin-chatluna/utils/logger'
+import { modelSchema } from 'koishi-plugin-chatluna/utils/schema'
+import {
   getImageType,
   getMessageContent,
-} = require('koishi-plugin-chatluna/utils/string')
-const { createLogger } = require('koishi-plugin-chatluna/utils/logger')
+} from 'koishi-plugin-chatluna/utils/string'
+import { z } from 'zod'
 
-const name = 'chatluna-forward-msg'
-const inject = ['chatluna', 'http', 'database']
+export const name = 'chatluna-forward-msg'
+export const inject = ['chatluna', 'http', 'database']
 
 let logger
 
@@ -53,17 +53,7 @@ type ImageModelRef = {
   value?: ChatModel
 }
 
-type PluginContext = {
-  http: (url: string, config?: Record<string, any>) => Promise<{ data: any }>
-  on: (event: string, listener: () => Promise<void> | void) => void
-  model: {
-    extend: (name: string, fields: Record<string, any>, options?: Record<string, any>) => void
-  }
-  database: {
-    get: (table: string, query: Record<string, any>, fields?: string[]) => Promise<any[]>
-    remove: (table: string, query: Record<string, any>) => Promise<void>
-    upsert: (table: string, rows: Record<string, any>[], keys: string[]) => Promise<void>
-  }
+type PluginContext = Context & {
   chatluna: {
     createChatModel: (name: string) => Promise<ImageModelRef>
     platform: {
@@ -75,7 +65,14 @@ type PluginContext = {
 type CacheRow = {
   key: string
   payload: any
+  createdAt?: string | number | Date
   expiresAt: string | number | Date
+}
+
+declare module 'koishi' {
+  interface Tables {
+    chatluna_forward_msg_cache: CacheRow
+  }
 }
 
 type NapcatInternal = {
@@ -563,7 +560,7 @@ function buildReadCacheKey({ messageId, maxDepth, describeImageInRead }: {
   return `v1:${trimText(messageId)}:depth=${maxDepth}:img=${describeImageInRead ? 1 : 0}`
 }
 
-function apply(ctx: PluginContext, config: PluginConfig) {
+export function apply(ctx: PluginContext, config: PluginConfig) {
   logger = createLogger(ctx, name)
 
   ctx.model.extend(FORWARD_MSG_CACHE_TABLE, {
@@ -576,7 +573,7 @@ function apply(ctx: PluginContext, config: PluginConfig) {
     indexes: ['expiresAt'],
   })
 
-  const plugin = new ChatLunaPlugin(ctx, config, 'forward-msg', false)
+  const plugin = new ChatLunaPlugin(ctx, config as any, 'forward-msg', false)
   const cacheService = new ForwardMsgCacheService(ctx, config)
   let imageModelRef
   let imageModelName = ''
@@ -2225,7 +2222,7 @@ class DescribeImageByUrlTool extends StructuredTool {
   }
 }
 
-const Config = Schema.intersect([
+export const Config = Schema.intersect([
   Schema.object({
     protocolService: Schema.object({
       enableNapcat: Schema.boolean().default(DEFAULT_PROTOCOL_NAPCAT).description('启用 NapCat OneBot 协议'),
@@ -2269,7 +2266,7 @@ const Config = Schema.intersect([
   }),
 ])
 
-const usage = `
+export const usage = `
 ## chatluna-forward-msg
 
 **使用本插件即代表您已阅读并同意以下内容，如不同意，请立即卸载本插件：**
@@ -2285,11 +2282,3 @@ const usage = `
 - 在 chatluna 插件的“对话行为选项”中启用：attachForwardMsgIdToContext。
 - 在 chatluna-character 插件的“对话设置”中启用：enableMessageId。
 `
-
-module.exports = {
-  name,
-  inject,
-  usage,
-  Config,
-  apply,
-}
