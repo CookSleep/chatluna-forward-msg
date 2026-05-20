@@ -54,11 +54,9 @@ declare module 'koishi' {
 export declare function apply(ctx: PluginContext, config: PluginConfig): void;
 export declare const Config: Schema<Schemastery.ObjectS<{
     protocolService: Schema<Schemastery.ObjectS<{
-        enableNapcat: Schema<boolean, boolean>;
-        enableLLBot: Schema<boolean, boolean>;
+        protocol: Schema<"napcat" | "llbot", "napcat" | "llbot">;
     }>, Schemastery.ObjectT<{
-        enableNapcat: Schema<boolean, boolean>;
-        enableLLBot: Schema<boolean, boolean>;
+        protocol: Schema<"napcat" | "llbot", "napcat" | "llbot">;
     }>>;
     readTool: Schema<Schemastery.ObjectS<{
         enable: Schema<boolean, boolean>;
@@ -105,11 +103,13 @@ export declare const Config: Schema<Schemastery.ObjectS<{
     imageService: Schema<Schemastery.ObjectS<{
         model: Schema<any, any>;
         prompt: Schema<string, string>;
+        skipSticker: Schema<boolean, boolean>;
         taskConcurrency: Schema<number, number>;
         requestTimeoutSeconds: Schema<number, number>;
     }>, Schemastery.ObjectT<{
         model: Schema<any, any>;
         prompt: Schema<string, string>;
+        skipSticker: Schema<boolean, boolean>;
         taskConcurrency: Schema<number, number>;
         requestTimeoutSeconds: Schema<number, number>;
     }>>;
@@ -126,8 +126,7 @@ export declare const Config: Schema<Schemastery.ObjectS<{
     }>>;
 }>, {
     protocolService: Schemastery.ObjectT<{
-        enableNapcat: Schema<boolean, boolean>;
-        enableLLBot: Schema<boolean, boolean>;
+        protocol: Schema<"napcat" | "llbot", "napcat" | "llbot">;
     }>;
     readTool: Schemastery.ObjectT<{
         enable: Schema<boolean, boolean>;
@@ -155,6 +154,7 @@ export declare const Config: Schema<Schemastery.ObjectS<{
     imageService: Schemastery.ObjectT<{
         model: Schema<any, any>;
         prompt: Schema<string, string>;
+        skipSticker: Schema<boolean, boolean>;
         taskConcurrency: Schema<number, number>;
         requestTimeoutSeconds: Schema<number, number>;
     }>;

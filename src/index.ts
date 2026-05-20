@@ -1,5 +1,6 @@
 import fs from 'fs/promises'
 import path from 'path'
+import crypto from 'crypto'
 import { HumanMessage } from '@langchain/core/messages'
 import { StructuredTool } from '@langchain/core/tools'
 import { Schema, type Context } from 'koishi'
@@ -129,6 +130,7 @@ type ReadToolDeps = BaseToolDeps & {
 
 type DescribeImageToolDeps = BaseToolDeps & {
   ensureImageModelRef: () => Promise<ImageModelRef | undefined>
+  cacheService: ForwardMsgCacheService
 }
 
 type MessageSegment = {
@@ -270,6 +272,13 @@ type DescribeToolInput = {
 type ImageMeta = {
   dataUrl: string
   mime: string
+  hash: string
+}
+
+type ImageSourceRef = {
+  source: string
+  sourceHash?: string
+  sticker?: boolean
 }
 
 type NameCache = Map<string, string>
@@ -294,18 +303,46 @@ type ResolveBotDisplayNameArgs = {
 type ImageTaskRef = {
   entry: StagedForwardEntry
   source: string
+  sourceHash?: string
   messageId: string
 }
 
 type GroupedImageTask = {
   source: string
+  sourceHash?: string
   refs: ImageTaskRef[]
+}
+
+type DownloadedImageTask = GroupedImageTask & {
+  meta?: ImageMeta
+  description?: string
+  reason?: string
+  costMs: number
+}
+
+type HashedImageTask = {
+  source: string
+  hash: string
+  mime: string
+  dataUrl: string
+  refs: ImageTaskRef[]
+}
+
+type DescribeImageTasksArgs = {
+  ctx: PluginContext
+  ensureImageModelRef: () => Promise<ImageModelRef | undefined>
+  cacheService: ForwardMsgCacheService
+  config: PluginConfig
+  imageConfig: ReturnType<typeof getImageServiceConfig>
+  imageTasks: ImageTaskRef[]
+  budget: ReadParseBudget
 }
 
 type ParseForwardMessagesArgs = {
   ctx: PluginContext
   internal: NapcatInternal
   ensureImageModelRef: () => Promise<ImageModelRef | undefined>
+  cacheService: ForwardMsgCacheService
   config: PluginConfig
   messages: ForwardMessage[]
   depth: number
@@ -321,8 +358,7 @@ const DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60
 const DEFAULT_CACHE_STORAGE_PATH = './data/chatluna-forward-msg-storage'
 const DEFAULT_CACHE_CLEANUP_INTERVAL_SECONDS = 10 * 60
 const FORWARD_MSG_CACHE_TABLE = 'chatluna_forward_msg_cache'
-const DEFAULT_PROTOCOL_NAPCAT = true
-const DEFAULT_PROTOCOL_LLBOT = false
+const DEFAULT_PROTOCOL: AdapterProtocol = 'napcat'
 
 function normalizeInt(value, fallback, min, max) {
   const parsed = Number.parseInt(String(value), 10)
@@ -345,29 +381,58 @@ function normalizeSecondsFromConfig(secondsValue, msValue, fallbackSeconds, minS
 
 function getProtocolConfig(config: PluginConfig) {
   const protocol = config?.protocolService || {}
-  const enableNapcat = protocol.enableNapcat ?? DEFAULT_PROTOCOL_NAPCAT
-  const enableLLBot = protocol.enableLLBot ?? DEFAULT_PROTOCOL_LLBOT
-  return {
-    enableNapcat: enableNapcat !== false,
-    enableLLBot: enableLLBot === true,
+  const selected = trimText(protocol.protocol)
+  if (selected === 'napcat' || selected === 'llbot') {
+    return { protocol: selected as AdapterProtocol }
   }
+
+  if (protocol.enableLLBot === true) {
+    return { protocol: 'llbot' as AdapterProtocol }
+  }
+
+  return { protocol: DEFAULT_PROTOCOL }
+}
+
+function migrateConfig(config: PluginConfig): boolean {
+  const protocol = config.protocolService || {}
+  const selected = trimText(protocol.protocol)
+  let modified = false
+
+  if (selected !== 'napcat' && selected !== 'llbot') {
+    protocol.protocol = protocol.enableLLBot === true ? 'llbot' : DEFAULT_PROTOCOL
+    modified = true
+  }
+
+  if (protocol.enableNapcat != null) {
+    delete protocol.enableNapcat
+    modified = true
+  }
+
+  if (protocol.enableLLBot != null) {
+    delete protocol.enableLLBot
+    modified = true
+  }
+
+  config.protocolService = protocol
+  return modified
+}
+
+async function writeMigratedConfig(ctx: PluginContext, config: PluginConfig) {
+  const runtimeCtx = ctx as any
+  if (!runtimeCtx.scope?.config || !runtimeCtx.loader?.writeConfig) return
+  Object.assign(runtimeCtx.scope.config, config)
+  await runtimeCtx.loader.writeConfig()
 }
 
 function validateProtocolSelection(config: PluginConfig): { ok: true, protocol: AdapterProtocol } | { ok: false, error: string } {
   const protocolConfig = getProtocolConfig(config)
-  const enabled = [
-    protocolConfig.enableNapcat ? 'napcat' : '',
-    protocolConfig.enableLLBot ? 'llbot' : '',
-  ].filter(Boolean)
-
-  if (enabled.length !== 1) {
+  if (protocolConfig.protocol !== 'napcat' && protocolConfig.protocol !== 'llbot') {
     return {
       ok: false,
-      error: 'protocolService 配置错误：NapCat 与 LLBot 必须且只能开启一个协议。',
+      error: 'protocolService 配置错误：请选择 NapCat 或 LLBot 协议。',
     }
   }
-
-  return { ok: true, protocol: enabled[0] as AdapterProtocol }
+  return { ok: true, protocol: protocolConfig.protocol }
 }
 
 function getReadToolConfig(config) {
@@ -429,6 +494,7 @@ function getImageServiceConfig(config) {
   return {
     model: trimText(image.model ?? config?.imageModel) || '无',
     prompt: trimText(image.prompt ?? config?.imagePrompt) || DEFAULT_IMAGE_PROMPT,
+    skipSticker: image.skipSticker !== false,
     taskConcurrency: normalizeInt(image.taskConcurrency ?? config?.imageTaskConcurrency, 20, 1, 100),
     requestTimeoutSeconds,
     requestTimeoutMs: requestTimeoutSeconds * 1000,
@@ -552,16 +618,30 @@ class ForwardMsgCacheService {
   }
 }
 
-function buildReadCacheKey({ messageId, maxDepth, describeImageInRead }: {
+function buildReadCacheKey({ messageId, maxDepth, describeImageInRead, skipSticker }: {
   messageId: string
   maxDepth: number
   describeImageInRead: boolean
+  skipSticker: boolean
 }) {
-  return `v1:${trimText(messageId)}:depth=${maxDepth}:img=${describeImageInRead ? 1 : 0}`
+  return `v3:${trimText(messageId)}:depth=${maxDepth}:img=${describeImageInRead ? 1 : 0}:skipSticker=${skipSticker ? 1 : 0}`
+}
+
+function sha256Hex(input: string | Buffer): string {
+  return crypto.createHash('sha256').update(input).digest('hex')
+}
+
+function buildImageDescriptionCacheKey({ imageHash, imagePrompt, modelName }: {
+  imageHash: string
+  imagePrompt: string
+  modelName: string
+}) {
+  return `image-desc:v1:model=${sha256Hex(modelName || 'none')}:prompt=${sha256Hex(imagePrompt)}:hash=${imageHash}`
 }
 
 export function apply(ctx: PluginContext, config: PluginConfig) {
   logger = createLogger(ctx, name)
+  const configMigrated = migrateConfig(config)
 
   ctx.model.extend(FORWARD_MSG_CACHE_TABLE, {
     key: 'string',
@@ -597,6 +677,11 @@ export function apply(ctx: PluginContext, config: PluginConfig) {
   }
 
   ctx.on('ready', async () => {
+    if (configMigrated) {
+      await writeMigratedConfig(ctx, config)
+      logger.info('已迁移协议配置到 protocolService.protocol')
+    }
+
     const protocolCheck = validateProtocolSelection(config)
     if ('error' in protocolCheck) {
       throw new Error(protocolCheck.error)
@@ -697,14 +782,14 @@ export function apply(ctx: PluginContext, config: PluginConfig) {
     }
 
     if (describeImageTool.enable) {
-      const tool = new DescribeImageByUrlTool({ ctx, config, ensureImageModelRef })
+      const tool = new DescribeImageByUrlTool({ ctx, config, ensureImageModelRef, cacheService })
       plugin.registerTool(describeImageTool.name, {
         description: tool.description,
         selector() {
           return true
         },
         createTool() {
-          return new DescribeImageByUrlTool({ ctx, config, ensureImageModelRef })
+          return new DescribeImageByUrlTool({ ctx, config, ensureImageModelRef, cacheService })
         },
         meta: {
           source: 'extension',
@@ -833,6 +918,26 @@ function isHttpOrHttpsUrl(url) {
   }
 }
 
+function extractImageIdentityHash(data: Record<string, any>): string {
+  const candidates = [
+    data?.hash,
+    data?.sha256,
+    data?.sha1,
+    data?.md5,
+    data?.file,
+    data?.file_id,
+  ]
+
+  for (const candidate of candidates) {
+    const text = trimText(candidate).toLowerCase()
+    if (!text) continue
+    const matched = /\b([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})\b/i.exec(text)
+    if (matched?.[1]) return matched[1].toLowerCase()
+  }
+
+  return ''
+}
+
 async function readImageAsDataUrlWithMeta(ctx: PluginContext, url: string, timeout: number): Promise<ImageMeta> {
   if (!url || typeof url !== 'string') {
     throw new Error('Invalid image url.')
@@ -875,12 +980,49 @@ async function readImageAsDataUrlWithMeta(ctx: PluginContext, url: string, timeo
   return {
     dataUrl: `data:${mime};base64,${buffer.toString('base64')}`,
     mime: trimText(mime).toLowerCase(),
+    hash: sha256Hex(buffer),
   }
 }
 
-async function readImageAsDataUrl(ctx: PluginContext, url: string, timeout: number): Promise<string> {
-  const meta = await readImageAsDataUrlWithMeta(ctx, url, timeout)
-  return meta.dataUrl
+async function readImagesAsDataUrlsByHash(
+  ctx: PluginContext,
+  urls: string[],
+  concurrency: number,
+  timeout: number,
+): Promise<string[]> {
+  const refs = (urls || [])
+    .map((url, index) => ({ url: trimText(url), index }))
+    .filter((item) => item.url)
+  const groupedByUrl = new Map<string, { url: string, indexes: number[] }>()
+
+  for (const ref of refs) {
+    if (!groupedByUrl.has(ref.url)) {
+      groupedByUrl.set(ref.url, { url: ref.url, indexes: [] })
+    }
+    groupedByUrl.get(ref.url)!.indexes.push(ref.index)
+  }
+
+  const groups = Array.from(groupedByUrl.values())
+  const downloaded = await mapWithConcurrency(
+    groups,
+    concurrency,
+    async (group) => ({ ...group, meta: await readImageAsDataUrlWithMeta(ctx, group.url, timeout) }),
+  )
+  const dataUrlByHash = new Map<string, string>()
+  const result = new Array<string>(urls.length)
+
+  for (const item of downloaded) {
+    const hash = trimText(item.meta.hash)
+    const dataUrl = dataUrlByHash.get(hash) || item.meta.dataUrl
+    if (hash && !dataUrlByHash.has(hash)) {
+      dataUrlByHash.set(hash, dataUrl)
+    }
+    for (const index of item.indexes) {
+      result[index] = dataUrl
+    }
+  }
+
+  return result.filter(Boolean)
 }
 
 async function describeImageWithModel({
@@ -1526,10 +1668,226 @@ function getMessageSegments(message: ForwardMessage): MessageSegment[] {
   return []
 }
 
+function isStickerImage(type: string, data: Record<string, any>): boolean {
+  return (
+    type === 'mface' ||
+    data.sticker === true ||
+    data.subType === 1 ||
+    data['sub-type'] === 1 ||
+    data.sub_type === 1 ||
+    data.summary === '[动画表情]'
+  )
+}
+
+function collectImageTasks({ entry, sources, imageConfig, imageTasks }: {
+  entry: StagedForwardEntry
+  sources: ImageSourceRef[]
+  imageConfig: ReturnType<typeof getImageServiceConfig>
+  imageTasks: ImageTaskRef[]
+}) {
+  let skipped = 0
+
+  for (const item of sources) {
+    if (imageConfig.skipSticker && item.sticker) {
+      entry.contentParts.push('[表情包]')
+      skipped += 1
+      continue
+    }
+
+    imageTasks.push({
+      entry,
+      source: item.source,
+      sourceHash: item.sourceHash,
+      messageId: entry.messageId || '-',
+    })
+  }
+
+  if (skipped > 0) {
+    logger.info(
+      'image parse skipped stickers, messageId=%s, stickerCount=%d',
+      entry.messageId || '-',
+      skipped,
+    )
+  }
+}
+
+function appendImageResult(image: { refs?: ImageTaskRef[], description?: string }) {
+  for (const ref of image.refs || []) {
+    ref.entry.contentParts.push(toMarkdownImage(image.description, ref.source))
+  }
+}
+
+async function describeImageTasks(args: DescribeImageTasksArgs) {
+  if (!args.imageTasks.length) return
+
+  const totalStart = Date.now()
+  const bySource = new Map<string, GroupedImageTask>()
+  for (const task of args.imageTasks) {
+    const source = trimText(task.source)
+    const hash = trimText(task.sourceHash)
+    const key = hash ? `hash:${hash}` : `url:${source}`
+    if (!key) continue
+    if (!bySource.has(key)) {
+      bySource.set(key, { source: task.source, sourceHash: hash, refs: [] })
+    }
+    bySource.get(key)!.refs.push(task)
+  }
+
+  const sourceTasks = Array.from(bySource.values())
+  const sourceDedup = Math.max(0, args.imageTasks.length - sourceTasks.length)
+  logger.info(
+    'image parse global batch start, imageCount=%d, sourceGroupCount=%d, sourceDedupSaved=%d, concurrency=%d, timeoutSeconds=%d',
+    args.imageTasks.length,
+    sourceTasks.length,
+    sourceDedup,
+    args.imageConfig.taskConcurrency,
+    args.imageConfig.requestTimeoutSeconds,
+  )
+
+  const downloaded = await mapWithConcurrency(
+    sourceTasks,
+    args.imageConfig.taskConcurrency,
+    async (task): Promise<DownloadedImageTask> => {
+      const startedAt = Date.now()
+      if (shouldStopReadParse(args.budget) || getReadBudgetRemainingMs(args.budget) <= 500) {
+        return { ...task, description: '', reason: 'budget_low', costMs: Date.now() - startedAt }
+      }
+
+      let lastError
+      for (const source of dedupeOrdered([task.source, ...task.refs.map((ref) => ref.source)])) {
+        try {
+          const meta = await readImageAsDataUrlWithMeta(
+            args.ctx,
+            source,
+            args.imageConfig.requestTimeoutMs,
+          )
+          return { ...task, source, meta, costMs: Date.now() - startedAt }
+        } catch (error) {
+          lastError = error
+        }
+      }
+
+      const reason = classifyImageError(lastError)
+      return {
+        ...task,
+        description: `图片解析失败(${reason})：${lastError?.message || String(lastError)}`,
+        reason,
+        costMs: Date.now() - startedAt,
+      }
+    },
+  )
+
+  const failed = downloaded.filter((item) => !item.meta)
+  failed.forEach(appendImageResult)
+
+  const byHash = new Map<string, HashedImageTask>()
+  for (const item of downloaded) {
+    if (!item.meta) continue
+    if (!byHash.has(item.meta.hash)) {
+      byHash.set(item.meta.hash, {
+        source: item.source,
+        hash: item.meta.hash,
+        mime: item.meta.mime,
+        dataUrl: item.meta.dataUrl,
+        refs: [],
+      })
+    }
+    byHash.get(item.meta.hash)!.refs.push(...item.refs)
+  }
+
+  const hashTasks = Array.from(byHash.values())
+  const hashDedup = Math.max(0, downloaded.filter((item) => item.meta).length - hashTasks.length)
+  const modelName = resolveModelName(args.ctx, args.config) || 'none'
+  const described = await mapWithConcurrency(
+    hashTasks,
+    args.imageConfig.taskConcurrency,
+    async (task) => {
+      const startedAt = Date.now()
+      const cacheKey = buildImageDescriptionCacheKey({
+        imageHash: task.hash,
+        imagePrompt: args.imageConfig.prompt,
+        modelName,
+      })
+
+      if (shouldStopReadParse(args.budget) || getReadBudgetRemainingMs(args.budget) <= 500) {
+        return { ...task, description: '', reason: 'budget_low', costMs: Date.now() - startedAt, cacheHit: false }
+      }
+
+      const cached = await args.cacheService.get(cacheKey)
+      if (cached && typeof cached === 'object' && trimText(cached.imageHash) === task.hash) {
+        return {
+          ...task,
+          description: trimText(cached.description),
+          reason: trimText(cached.reason),
+          costMs: Date.now() - startedAt,
+          cacheHit: true,
+        }
+      }
+
+      let description = ''
+      let reason = ''
+      if (task.mime === 'image/gif') {
+        reason = 'gif_skipped'
+      } else {
+        try {
+          description = await describeImageWithModel({
+            modelRef: await args.ensureImageModelRef(),
+            imagePrompt: args.imageConfig.prompt,
+            dataUrl: task.dataUrl,
+          })
+        } catch (error) {
+          reason = classifyImageError(error)
+          description = `图片解析失败(${reason})：${error?.message || String(error)}`
+        }
+      }
+
+      await args.cacheService.set(cacheKey, {
+        imageHash: task.hash,
+        mime: task.mime,
+        modelName,
+        promptHash: sha256Hex(args.imageConfig.prompt),
+        description: trimText(description),
+        reason: trimText(reason),
+      })
+
+      return {
+        ...task,
+        description,
+        reason,
+        costMs: Date.now() - startedAt,
+        cacheHit: false,
+      }
+    },
+  )
+
+  described.forEach(appendImageResult)
+
+  const all = [...failed, ...described]
+  const reasonCount: Record<string, number> = {}
+  for (const item of all) {
+    const reason = trimText(item.reason)
+    if (reason) reasonCount[reason] = (reasonCount[reason] || 0) + 1
+  }
+  logger.info(
+    'image parse global batch done, imageCount=%d, sourceGroupCount=%d, uniqueHashCount=%d, sourceDedupSaved=%d, hashDedupSaved=%d, cacheHit=%d, described=%d, placeholder=%d, costMs=%d, reasons=%s',
+    args.imageTasks.length,
+    sourceTasks.length,
+    hashTasks.length,
+    sourceDedup,
+    hashDedup,
+    described.filter((item) => item.cacheHit).length,
+    described.filter((item) => trimText(item.description) && !trimText(item.reason)).length,
+    all.filter((item) => !trimText(item.description)).length,
+    Date.now() - totalStart,
+    JSON.stringify(reasonCount),
+  )
+}
+
 async function parseForwardMessages({
   ctx,
   internal,
   ensureImageModelRef,
+  cacheService,
   config,
   messages,
   depth,
@@ -1566,7 +1924,7 @@ async function parseForwardMessages({
     }
 
     const segments = getMessageSegments(message)
-    const imageSources: string[] = []
+    const imageSources: ImageSourceRef[] = []
 
     for (const segment of segments) {
       const type = segment?.type
@@ -1592,7 +1950,13 @@ async function parseForwardMessages({
 
       if (type === 'image' || type === 'mface') {
         const source = trimText(data.url)
-        if (source) imageSources.push(source)
+        if (source) {
+          imageSources.push({
+            source,
+            sourceHash: extractImageIdentityHash(data),
+            sticker: isStickerImage(type, data),
+          })
+        }
         continue
       }
 
@@ -1616,6 +1980,7 @@ async function parseForwardMessages({
           ctx,
           internal,
           ensureImageModelRef,
+          cacheService,
           config,
           messages: [{
             sender: {
@@ -1650,6 +2015,7 @@ async function parseForwardMessages({
             ctx,
             internal,
             ensureImageModelRef,
+            cacheService,
             config,
             messages: inlineContent,
             depth: depth - 1,
@@ -1672,6 +2038,7 @@ async function parseForwardMessages({
             ctx,
             internal,
             ensureImageModelRef,
+            cacheService,
             config,
             messages: nestedMessages,
             depth: depth - 1,
@@ -1699,7 +2066,7 @@ async function parseForwardMessages({
         getReadBudgetRemainingMs(parseBudget) > 3000
 
       if (!canDescribeImages) {
-        for (const source of imageSources) {
+        for (const { source } of imageSources) {
           entry.contentParts.push(toMarkdownImage('', source))
         }
         logger.info(
@@ -1709,13 +2076,7 @@ async function parseForwardMessages({
           readToolConfig.describeImageInRead ? 'budget_low' : 'disabled',
         )
       } else {
-        for (const source of imageSources) {
-          imageTasks.push({
-            entry,
-            source,
-            messageId: entry.messageId || '-',
-          })
-        }
+        collectImageTasks({ entry, sources: imageSources, imageConfig, imageTasks })
       }
     }
 
@@ -1723,82 +2084,15 @@ async function parseForwardMessages({
     if (shouldStopReadParse(parseBudget)) break
   }
 
-  if (imageTasks.length > 0) {
-    const totalStart = Date.now()
-    const groupedImageTasks = new Map<string, GroupedImageTask>()
-    for (const task of imageTasks) {
-      const key = trimText(task.source)
-      if (!key) continue
-      if (!groupedImageTasks.has(key)) {
-        groupedImageTasks.set(key, {
-          source: task.source,
-          refs: [],
-        })
-      }
-      groupedImageTasks.get(key).refs.push(task)
-    }
-    const uniqueImageTasks = Array.from(groupedImageTasks.values())
-    const dedupSaved = Math.max(0, imageTasks.length - uniqueImageTasks.length)
-    logger.info(
-      'image parse global batch start, imageCount=%d, uniqueImageCount=%d, dedupSaved=%d, concurrency=%d, timeoutSeconds=%d',
-      imageTasks.length,
-      uniqueImageTasks.length,
-      dedupSaved,
-      imageConfig.taskConcurrency,
-      imageConfig.requestTimeoutSeconds,
-    )
-    const images = await mapWithConcurrency(
-      uniqueImageTasks,
-      imageConfig.taskConcurrency,
-      async (task) => {
-        const imageStart = Date.now()
-        if (shouldStopReadParse(parseBudget) || getReadBudgetRemainingMs(parseBudget) <= 500) {
-          return { ...task, description: '', reason: 'budget_low', costMs: Date.now() - imageStart }
-        }
-        let description = ''
-        let reason = ''
-        try {
-          const imageMeta = await readImageAsDataUrlWithMeta(ctx, task.source, imageConfig.requestTimeoutMs)
-          if (imageMeta.mime === 'image/gif') {
-            reason = 'gif_skipped'
-          } else {
-            const modelRef = await ensureImageModelRef()
-            description = await describeImageWithModel({
-              modelRef,
-              imagePrompt: imageConfig.prompt,
-              dataUrl: imageMeta.dataUrl,
-            })
-          }
-        } catch (error) {
-          reason = classifyImageError(error)
-          description = `图片解析失败(${reason})：${error?.message || String(error)}`
-        }
-        return { ...task, description, reason, costMs: Date.now() - imageStart }
-      },
-    )
-    for (const image of images) {
-      const refs = Array.isArray(image.refs) ? image.refs : []
-      for (const ref of refs) {
-        ref.entry.contentParts.push(toMarkdownImage(image.description, image.source))
-      }
-    }
-    const reasonCount: Record<string, number> = {}
-    for (const image of images) {
-      const reason = trimText(image.reason)
-      if (!reason) continue
-      reasonCount[reason] = (reasonCount[reason] || 0) + 1
-    }
-    logger.info(
-      'image parse global batch done, imageCount=%d, uniqueImageCount=%d, dedupSaved=%d, described=%d, placeholder=%d, costMs=%d, reasons=%s',
-      imageTasks.length,
-      images.length,
-      dedupSaved,
-      images.filter((x) => trimText(x.description) && !trimText(x.reason)).length,
-      images.filter((x) => !trimText(x.description)).length,
-      Date.now() - totalStart,
-      JSON.stringify(reasonCount),
-    )
-  }
+  await describeImageTasks({
+    ctx,
+    ensureImageModelRef,
+    cacheService,
+    config,
+    imageConfig,
+    imageTasks,
+    budget: parseBudget,
+  })
 
   for (const entry of stagedEntries) {
     const dedupedContentParts = dedupeOrdered(entry.contentParts)
@@ -1864,6 +2158,7 @@ class ReadForwardMsgTool extends StructuredTool {
       const { internal } = checked
       const messageId = trimText(input.messageId)
       const readToolConfig = getReadToolConfig(this.deps.config)
+      const imageConfig = getImageServiceConfig(this.deps.config)
       const maxDepth = Number.isInteger(input.maxDepth)
         ? input.maxDepth
         : readToolConfig.maxParseDepth
@@ -1873,6 +2168,7 @@ class ReadForwardMsgTool extends StructuredTool {
         messageId,
         maxDepth,
         describeImageInRead: readToolConfig.describeImageInRead,
+        skipSticker: imageConfig.skipSticker,
       })
       const cached = await this.deps.cacheService.get(cacheKey)
       if (Array.isArray(cached)) {
@@ -1897,6 +2193,7 @@ class ReadForwardMsgTool extends StructuredTool {
         ctx: this.deps.ctx,
         internal,
         ensureImageModelRef: this.deps.ensureImageModelRef,
+        cacheService: this.deps.cacheService,
         config: this.deps.config,
         messages: rootMessages,
         depth: nestedDepth,
@@ -2016,10 +2313,11 @@ class SendForwardMsgTool extends StructuredTool {
           content.push(toTextSegment(text))
         }
 
-        const dataUrls = await mapWithConcurrency(
+        const dataUrls = await readImagesAsDataUrlsByHash(
+          this.deps.ctx,
           imageUrls,
           imageConfig.taskConcurrency,
-          (imageUrl) => readImageAsDataUrl(this.deps.ctx, imageUrl, imageConfig.requestTimeoutMs),
+          imageConfig.requestTimeoutMs,
         )
         for (const dataUrl of dataUrls) {
           content.push(toImageSegment(dataUrl))
@@ -2122,10 +2420,11 @@ class SendFakeMsgTool extends StructuredTool {
           content.push(toTextSegment(text))
         }
 
-        const dataUrls = await mapWithConcurrency(
+        const dataUrls = await readImagesAsDataUrlsByHash(
+          this.deps.ctx,
           imageUrls,
           imageConfig.taskConcurrency,
-          (imageUrl) => readImageAsDataUrl(this.deps.ctx, imageUrl, imageConfig.requestTimeoutMs),
+          imageConfig.requestTimeoutMs,
         )
         for (const dataUrl of dataUrls) {
           content.push(toImageSegment(dataUrl))
@@ -2197,9 +2496,27 @@ class DescribeImageByUrlTool extends StructuredTool {
       if (imageMeta.mime === 'image/gif') {
         return JSON.stringify({
           url: sourceUrl,
+          hash: imageMeta.hash,
           skipped: true,
           reason: 'gif_skipped',
           description: '',
+        }, null, 2)
+      }
+
+      const modelName = resolveModelName(this.deps.ctx, this.deps.config) || 'none'
+      const cacheKey = buildImageDescriptionCacheKey({
+        imageHash: imageMeta.hash,
+        imagePrompt: finalPrompt,
+        modelName,
+      })
+      const cached = await this.deps.cacheService.get(cacheKey)
+      if (cached && typeof cached === 'object' && trimText(cached.imageHash) === imageMeta.hash) {
+        return JSON.stringify({
+          url: sourceUrl,
+          hash: imageMeta.hash,
+          requirement: requirement || '',
+          description: trimText(cached.description),
+          cached: true,
         }, null, 2)
       }
 
@@ -2209,9 +2526,18 @@ class DescribeImageByUrlTool extends StructuredTool {
         imagePrompt: finalPrompt,
         dataUrl: imageMeta.dataUrl,
       })
+      await this.deps.cacheService.set(cacheKey, {
+        imageHash: imageMeta.hash,
+        mime: imageMeta.mime,
+        modelName,
+        promptHash: sha256Hex(finalPrompt),
+        description: trimText(description),
+        reason: '',
+      })
 
       return JSON.stringify({
         url: sourceUrl,
+        hash: imageMeta.hash,
         requirement: requirement || '',
         description: trimText(description),
       }, null, 2)
@@ -2225,9 +2551,11 @@ class DescribeImageByUrlTool extends StructuredTool {
 export const Config = Schema.intersect([
   Schema.object({
     protocolService: Schema.object({
-      enableNapcat: Schema.boolean().default(DEFAULT_PROTOCOL_NAPCAT).description('启用 NapCat OneBot 协议'),
-      enableLLBot: Schema.boolean().default(DEFAULT_PROTOCOL_LLBOT).description('启用 LLBot OneBot 协议'),
-    }).description('协议选择（NapCat、LLBot 必须且只能开启一个）'),
+      protocol: Schema.union([
+        Schema.const('napcat').description('NapCat'),
+        Schema.const('llbot').description('LLBot'),
+      ]).default(DEFAULT_PROTOCOL).description('OneBot 协议'),
+    }).description('协议选择'),
     readTool: Schema.object({
       enable: Schema.boolean().default(true).description('是否启用（读取并解析合并转发消息，只提取文本和图片；图片可调用多模态模型生成描述）'),
       name: Schema.string().default('read_forward_msg').description('读取合并转发工具名（提供给 ChatLuna 调用）'),
@@ -2254,11 +2582,12 @@ export const Config = Schema.intersect([
     imageService: Schema.object({
       model: Schema.dynamic('model').default('无').description('用于图片描述的多模态模型'),
       prompt: Schema.string().role('textarea').default(DEFAULT_IMAGE_PROMPT).description('图片描述提示词'),
+      skipSticker: Schema.boolean().default(true).description('图片描述是否跳过表情包（sticker/mface），开启后仅保留图片占位，不调用多模态模型'),
       taskConcurrency: Schema.number().min(1).max(100).default(20).description('图片任务并发数（读取描述、发送下载共用）'),
       requestTimeoutSeconds: Schema.number().min(1).max(120).default(DEFAULT_IMAGE_REQUEST_TIMEOUT_SECONDS).description('下载图片请求超时时间（秒）'),
     }).description('图片描述服务'),
     cacheService: Schema.object({
-      enable: Schema.boolean().default(true).description('是否启用读取结果缓存。启用后同 message_id 会优先返回缓存，减少重复请求'),
+      enable: Schema.boolean().default(true).description('是否启用缓存。启用后同 message_id 会优先返回读取结果缓存，图片描述会按内容哈希缓存，减少重复请求'),
       ttlSeconds: Schema.number().min(60).max(30 * 24 * 60 * 60).default(DEFAULT_CACHE_TTL_SECONDS).description('缓存有效期（秒），默认 1 天'),
       storagePath: Schema.path({ filters: ['directory'] }).default(DEFAULT_CACHE_STORAGE_PATH).description('旧版本地缓存目录。插件启动前会检测并删除该目录'),
       cleanupIntervalSeconds: Schema.number().min(60).max(24 * 60 * 60).default(DEFAULT_CACHE_CLEANUP_INTERVAL_SECONDS).description('后台清理过期缓存的最小间隔（秒）'),
