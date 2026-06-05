@@ -455,7 +455,7 @@ function getSendToolConfig(config) {
     name: trimText(tool.name) || 'send_forward_msg',
     description:
       trimText(tool.description) ||
-      '以 Bot 自身身份发送合并转发消息，支持文本和图片 URL。',
+      '以 Bot 自身身份发送合并转发消息，支持文本和图片 URL。未指定目标时默认发送到当前会话（群聊自动使用当前群号，私聊自动使用当前用户）。',
     botDisplayName: trimText(tool.botDisplayName ?? config?.botDisplayName),
   }
 }
@@ -467,7 +467,7 @@ function getFakeToolConfig(config) {
     name: trimText(tool.name) || 'send_fake_msg',
     description:
       trimText(tool.description) ||
-      '以任意 senderId/senderName 伪造消息节点发送合并转发，支持文本和图片 URL。',
+      '以任意 senderId/senderName 伪造消息节点发送合并转发，支持文本和图片 URL。未指定目标时默认发送到当前会话（群聊自动使用当前群号，私聊自动使用当前用户）。',
   }
 }
 
@@ -2271,9 +2271,9 @@ class SendForwardMsgTool extends StructuredTool {
           ),
         ])
         .describe('消息数组，支持 JSON 字符串。每条可包含 text 与 images。'),
-      targetType: z.enum(['group', 'private']).optional().describe('发送目标类型。'),
-      groupId: z.string().optional().describe('目标群号。'),
-      userId: z.string().optional().describe('目标用户 QQ 号。'),
+      targetType: z.enum(['group', 'private']).optional().describe('发送目标类型，不填则自动判断（群聊默认 group，私聊默认 private）。'),
+      groupId: z.string().optional().describe('目标群号，不填则使用当前群号。'),
+      userId: z.string().optional().describe('目标用户 QQ 号，用于私聊发送；不填则使用当前会话用户。在群聊中设置 targetType 为 private 时必填。'),
     })
   }
 
@@ -2376,9 +2376,9 @@ class SendFakeMsgTool extends StructuredTool {
           ),
         ])
         .describe('伪造消息数组，支持 JSON 字符串。'),
-      targetType: z.enum(['group', 'private']).optional().describe('发送目标类型。'),
-      groupId: z.string().optional().describe('目标群号。'),
-      userId: z.string().optional().describe('目标用户 QQ 号。'),
+      targetType: z.enum(['group', 'private']).optional().describe('发送目标类型，不填则自动判断（群聊默认 group，私聊默认 private）。'),
+      groupId: z.string().optional().describe('目标群号，不填则使用当前群号。'),
+      userId: z.string().optional().describe('目标用户 QQ 号，用于私聊发送；不填则使用当前会话用户。在群聊中设置 targetType 为 private 时必填。'),
     })
   }
 
