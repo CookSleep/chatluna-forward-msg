@@ -671,7 +671,7 @@ export function apply(ctx: PluginContext, config: PluginConfig) {
       imageModelName = target
       return imageModelRef
     } catch (error) {
-      logger.warn('加载图片模型失败: %s', error?.message || String(error))
+      logger.warn('加载图片模型失败: %s', getErrorMessage(error))
       return undefined
     }
   }
@@ -875,8 +875,53 @@ async function callApi<T = unknown>(
 }
 
 function parseMimeFromDataUrl(dataUrl) {
-  const matched = /^data:([^;]+);base64,/i.exec(dataUrl || '')
+  const matched = /^data:([^;,]+)(?:;[^,]*)?;base64,/i.exec(dataUrl || '')
   return trimText(matched?.[1]).toLowerCase()
+}
+
+function isBase64DataUrl(value) {
+  return /^data:[^;,]+(?:;[^,]*)?;base64,/i.test(trimText(value))
+}
+
+function estimateBase64DataUrlBytes(dataUrl) {
+  const text = trimText(dataUrl)
+  const commaIndex = text.indexOf(',')
+  if (commaIndex < 0) return 0
+
+  const payload = text.slice(commaIndex + 1).replace(/\s/g, '')
+  if (!payload) return 0
+
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding)
+}
+
+function renderBase64UrlTag(dataUrl, kind = 'base64-url') {
+  const mime = parseMimeFromDataUrl(dataUrl) || 'unknown'
+  const bytes = estimateBase64DataUrlBytes(dataUrl)
+  return `[${kind}:base64:${mime}${bytes ? `:${bytes}B` : ''}]`
+}
+
+function sanitizeBase64Urls(value) {
+  const text = trimText(value)
+  if (!text) return ''
+  return text.replace(
+    /data:[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*(?:;[a-z0-9.+-]+=[^,;]*)*;base64,[a-z0-9+/=_-]+/ig,
+    (matched) => renderBase64UrlTag(matched),
+  )
+}
+
+function getErrorMessage(error) {
+  return sanitizeBase64Urls(error?.message || String(error))
+}
+
+function formatErrorForLog(error) {
+  const name = trimText(error?.name) || 'Error'
+  const code = trimText(error?.code || error?.cause?.code || error?.errno)
+  const status = trimText(error?.response?.status || error?.status)
+  const message = getErrorMessage(error)
+  return [name, code ? `code=${code}` : '', status ? `status=${status}` : '', message]
+    .filter(Boolean)
+    .join(', ')
 }
 
 function classifyImageError(error) {
@@ -904,6 +949,7 @@ function classifyImageError(error) {
 function maskLongUrl(url) {
   const text = trimText(url)
   if (!text) return ''
+  if (isBase64DataUrl(text)) return renderBase64UrlTag(text)
   return text.length > 160 ? `${text.slice(0, 157)}...` : text
 }
 
@@ -970,7 +1016,7 @@ async function readImageAsDataUrlWithMeta(ctx: PluginContext, url: string, timeo
       reason,
       timeout,
       maskLongUrl(trimmed),
-      trimText(error?.message || String(error)),
+      getErrorMessage(error),
     )
     throw error
   }
@@ -1059,7 +1105,7 @@ async function describeImageWithModel({
     logger.warn(
       'image model invoke failed, reason=%s, message=%s',
       reason,
-      trimText(error?.message || String(error)),
+      getErrorMessage(error),
     )
     throw error
   }
@@ -1132,6 +1178,7 @@ function escapeMarkdownAlt(text) {
 function toMarkdownImage(description, source) {
   const url = trimText(source)
   if (!url) return '[图片]'
+  if (isBase64DataUrl(url)) return renderBase64UrlTag(url, '图片')
   const alt = escapeMarkdownAlt(description) || '图片'
   return `![${alt}](${url})`
 }
@@ -1141,6 +1188,7 @@ function toMarkdownMediaLink(kind, fileName, source) {
   const defaultName = kind === 'video' ? '视频' : '文件'
   const label = escapeMarkdownAlt(fileName) || defaultName
   const url = trimText(source)
+  if (isBase64DataUrl(url)) return renderBase64UrlTag(url, tag)
   if (!url || !isHttpOrHttpsUrl(url)) return `[${tag}:${label}]`
   return `[${tag}:${label}](${url})`
 }
@@ -1770,7 +1818,7 @@ async function describeImageTasks(args: DescribeImageTasksArgs) {
       const reason = classifyImageError(lastError)
       return {
         ...task,
-        description: `图片解析失败(${reason})：${lastError?.message || String(lastError)}`,
+        description: `图片解析失败(${reason})：${getErrorMessage(lastError)}`,
         reason,
         costMs: Date.now() - startedAt,
       }
@@ -1837,7 +1885,7 @@ async function describeImageTasks(args: DescribeImageTasksArgs) {
           })
         } catch (error) {
           reason = classifyImageError(error)
-          description = `图片解析失败(${reason})：${error?.message || String(error)}`
+          description = `图片解析失败(${reason})：${getErrorMessage(error)}`
         }
       }
 
@@ -2049,7 +2097,7 @@ async function parseForwardMessages({
             entry.forwards.push(...nested)
           }
         } catch (error) {
-          entry.contentParts.push(`嵌套转发读取失败(${nestedId})：${error?.message || String(error)}`)
+          entry.contentParts.push(`嵌套转发读取失败(${nestedId})：${getErrorMessage(error)}`)
         }
       }
     }
@@ -2241,8 +2289,8 @@ class ReadForwardMsgTool extends StructuredTool {
 
       return JSON.stringify(messages, null, 2)
     } catch (error) {
-      logger.warn('read_forward_msg failed', error)
-      return `read_forward_msg failed: ${error?.message || String(error)}`
+      logger.warn('read_forward_msg failed: %s', formatErrorForLog(error))
+      return `read_forward_msg failed: ${getErrorMessage(error)}`
     }
   }
 }
@@ -2344,8 +2392,8 @@ class SendForwardMsgTool extends StructuredTool {
       const messageId = data?.message_id || data?.res_id || ''
       return `发送成功，节点数：${nodes.length}，目标：${target.type}:${target.id}${messageId ? `，message_id:${messageId}` : ''}`
     } catch (error) {
-      logger.warn('send_forward_msg failed', error)
-      return `send_forward_msg failed: ${error?.message || String(error)}`
+      logger.warn('send_forward_msg failed: %s', formatErrorForLog(error))
+      return `send_forward_msg failed: ${getErrorMessage(error)}`
     }
   }
 }
@@ -2451,8 +2499,8 @@ class SendFakeMsgTool extends StructuredTool {
       const messageId = data?.message_id || data?.res_id || ''
       return `发送成功，伪造节点数：${nodes.length}，目标：${target.type}:${target.id}${messageId ? `，message_id:${messageId}` : ''}`
     } catch (error) {
-      logger.warn('send_fake_msg failed', error)
-      return `send_fake_msg failed: ${error?.message || String(error)}`
+      logger.warn('send_fake_msg failed: %s', formatErrorForLog(error))
+      return `send_fake_msg failed: ${getErrorMessage(error)}`
     }
   }
 }
@@ -2542,8 +2590,8 @@ class DescribeImageByUrlTool extends StructuredTool {
         description: trimText(description),
       }, null, 2)
     } catch (error) {
-      logger.warn('describe_image_by_url failed', error)
-      return `describe_image_by_url failed: ${error?.message || String(error)}`
+      logger.warn('describe_image_by_url failed: %s', formatErrorForLog(error))
+      return `describe_image_by_url failed: ${getErrorMessage(error)}`
     }
   }
 }
