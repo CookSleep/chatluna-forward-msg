@@ -2643,9 +2643,10 @@ export const Config = Schema.intersect([
   }),
 ])
 
-export const usage = `
-## chatluna-forward-msg
+export const usage = `## chatluna-forward-msg
+为 ChatLuna 提供 OneBot 合并转发消息的读取、发送、伪造发送与按 URL 描述图片工具，支持 NapCat 与 LLBot。
 
+### 使用声明
 **使用本插件即代表您已阅读并同意以下内容，如不同意，请立即卸载本插件：**
 - 本插件中的伪造身份发送合并转发能力仅用于开发测试与娱乐场景。
 - 使用者需自行确保符合当地法律法规与平台规则。
@@ -2653,9 +2654,9 @@ export const usage = `
 
 受平台服务端限制，本插件生成的合并转发并非完美，其缺陷可以被人轻易识破，平台也能检测出异常，请勿用于欺骗、冒充、骚扰或其他违法违规用途。
 
----
+### 前置配置
+需要通过 OneBot 适配器接入的 NapCat 或 LLBot，并在 \`protocolService\` 中选择对应实现；其他平台的会话中工具会直接返回错误。
 
-**使用前请确认已开启以下选项，否则本插件可能无法获取到合并转发所需的上下文信息：**
-- 在 chatluna 插件的“对话行为选项”中启用：attachForwardMsgIdToContext。
-- 在 chatluna-character 插件的“对话设置”中启用：enableMessageId。
-`
+使用前请确认已开启以下选项，否则本插件可能无法获取到合并转发所需的上下文信息：
+- 在 \`chatluna\` 插件的“对话行为选项”中启用 \`attachForwardMsgIdToContext\`。
+- 在 \`chatluna-character\` 插件的“对话设置”中启用 \`enableMessageId\`。`
