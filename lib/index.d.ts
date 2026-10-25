@@ -30,6 +30,10 @@ type ModelTypeValue = typeof ModelType[keyof typeof ModelType];
 type ImageModelRef = {
     value?: ChatModel;
 };
+type TransformableMessage = {
+    content?: unknown;
+    additional_kwargs?: Record<string, unknown>;
+};
 type PluginContext = Context & {
     chatluna: {
         createChatModel: (name: string) => Promise<ImageModelRef>;
@@ -37,6 +41,9 @@ type PluginContext = Context & {
             listAllModels: (type: ModelTypeValue) => {
                 value?: ChatModelInfoLite[];
             };
+        };
+        messageTransformer: {
+            intercept: (type: string, transformFunction: (session: unknown, element: unknown, message: TransformableMessage) => Promise<boolean | void>, priority?: number) => () => void;
         };
     };
 };
@@ -57,6 +64,11 @@ export declare const Config: Schema<Schemastery.ObjectS<{
         protocol: Schema<"napcat" | "llbot", "napcat" | "llbot">;
     }>, Schemastery.ObjectT<{
         protocol: Schema<"napcat" | "llbot", "napcat" | "llbot">;
+    }>>;
+    jsonCard: Schema<Schemastery.ObjectS<{
+        enable: Schema<boolean, boolean>;
+    }>, Schemastery.ObjectT<{
+        enable: Schema<boolean, boolean>;
     }>>;
     readTool: Schema<Schemastery.ObjectS<{
         enable: Schema<boolean, boolean>;
@@ -127,6 +139,9 @@ export declare const Config: Schema<Schemastery.ObjectS<{
 }>, {
     protocolService: Schemastery.ObjectT<{
         protocol: Schema<"napcat" | "llbot", "napcat" | "llbot">;
+    }>;
+    jsonCard: Schemastery.ObjectT<{
+        enable: Schema<boolean, boolean>;
     }>;
     readTool: Schemastery.ObjectT<{
         enable: Schema<boolean, boolean>;
