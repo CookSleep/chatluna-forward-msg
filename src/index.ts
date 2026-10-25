@@ -54,11 +54,23 @@ type ImageModelRef = {
   value?: ChatModel
 }
 
+type TransformableMessage = {
+  content?: unknown
+  additional_kwargs?: Record<string, unknown>
+}
+
 type PluginContext = Context & {
   chatluna: {
     createChatModel: (name: string) => Promise<ImageModelRef>
     platform: {
       listAllModels: (type: ModelTypeValue) => { value?: ChatModelInfoLite[] }
+    }
+    messageTransformer: {
+      intercept: (
+        type: string,
+        transformFunction: (session: unknown, element: unknown, message: TransformableMessage) => Promise<boolean | void>,
+        priority?: number,
+      ) => () => void
     }
   }
 }
@@ -805,6 +817,44 @@ export function apply(ctx: PluginContext, config: PluginConfig) {
       })
     }
   })
+
+  // QQ 在私聊与部分客户端下发的「合并转发」是 json 卡片（ARK），
+  // 先转成 forward id，模型才能用 read_forward_msg 回源读取
+  const { enable = true } = config?.jsonCard ?? {}
+  if (enable) {
+    ctx.effect(() =>
+      ctx.chatluna.messageTransformer.intercept('json', async (session, element, message) => {
+        // 只处理 OneBot 会话
+        if ((session as { platform?: unknown } | undefined)?.platform !== 'onebot') return false
+
+        // 解析卡片，非 com.tencent.multimsg 的 ark 卡一律跳过
+        const card = parseMultiMsgCard(element)
+        if (!card) return false
+
+        const content: string[] = []
+
+        // 登记转发 ID，供 read_forward_msg 回源
+        if (card.resid) {
+          const kwargs = (message.additional_kwargs ??= {})
+          const oldIds = Array.isArray(kwargs.forwardMessageIds)
+            ? kwargs.forwardMessageIds.filter((id): id is string => typeof id === 'string')
+            : []
+          kwargs.forwardMessageIds = [...new Set([...oldIds, card.resid])]
+          content.push(`<forward id="${card.resid}"/>`)
+        }
+
+        // 附带预览与摘要，方便模型判断要不要继续读
+        if (card.news.length) content.push(['[聊天记录预览]', ...card.news].join('\n'))
+        if (card.summary) content.push(`[summary] ${card.summary}`)
+
+        // 没有任何可用内容时交还给其它拦截器
+        if (!content.length) return false
+
+        appendMessageText(message, content.join('\n'))
+        return true
+      }),
+    )
+  }
 }
 
 function resolveModelName(ctx: PluginContext, config: PluginConfig): string {
@@ -1161,6 +1211,65 @@ function normalizeImageUrls(item: SendMessageItem | FakeMessageItem): string[] {
   }
 
   return urls.map((u) => u.trim()).filter(Boolean)
+}
+
+const MULTI_MSG_APP = 'com.tencent.multimsg'
+
+// QQ 下发的 ARK 卡片结构由客户端固定，这里只列本插件用到的字段
+type ArkCard = {
+  app?: string
+  desc?: string
+  meta?: { detail?: { resid?: string; summary?: string; news?: { text?: string }[] } }
+}
+
+/**
+ * QQ 在私聊与部分客户端下发的「合并转发」是 ARK 卡片（json 段，app 为
+ * com.tencent.multimsg），不是 OneBot 的 forward 段。卡片里的 resid 可直接作为
+ * get_forward_msg 的 id 回源；ChatLuna 没有 json 拦截器，不处理就只剩一条空引用。
+ *
+ * 非目标卡片、非法 JSON 一律返回 undefined，由其它拦截器继续处理。
+ */
+function parseMultiMsgCard(element: unknown): { resid: string; summary: string; news: string[] } | undefined {
+  // ChatLuna 把 koishi Element 原样传入，attrs 即 OneBot 段的 data
+  const attrs = (element as { attrs?: { data?: unknown } } | undefined)?.attrs
+  const raw = attrs?.data
+
+  let payload = ''
+  if (typeof raw === 'string') {
+    payload = raw
+  } else if (raw && typeof raw === 'object' && 'data' in raw && typeof raw.data === 'string') {
+    payload = raw.data
+  }
+  if (!payload.includes(MULTI_MSG_APP)) return undefined
+
+  let ark: ArkCard
+  try {
+    ark = JSON.parse(payload) as ArkCard
+  } catch {
+    return undefined
+  }
+  if (ark?.app !== MULTI_MSG_APP) return undefined
+
+  const detail = ark.meta?.detail
+  // JSON.parse 只保证语法合法，news 不一定是数组
+  const news = Array.isArray(detail?.news) ? detail.news : []
+
+  return {
+    resid: trimText(detail?.resid),
+    summary: trimText(detail?.summary) || trimText(ark.desc),
+    news: news.map((item) => trimText(item?.text)).filter(Boolean),
+  }
+}
+
+// ChatLuna 的 message.content 可能是字符串，也可能是 parts 数组
+function appendMessageText(message: TransformableMessage, text: string) {
+  if (!text) return
+  if (typeof message.content === 'string') {
+    message.content += text
+    return
+  }
+  const parts = Array.isArray(message.content) ? message.content : []
+  message.content = [...parts, { type: 'text', text }]
 }
 
 function trimText(value) {
@@ -2604,6 +2713,9 @@ export const Config = Schema.intersect([
         Schema.const('llbot').description('LLBot'),
       ]).default(DEFAULT_PROTOCOL).description('OneBot 协议'),
     }).description('协议选择'),
+    jsonCard: Schema.object({
+      enable: Schema.boolean().default(true).description('是否启用（把 QQ json 段的聊天记录卡片转成 forward id，使引用与消息里的合并转发能被读取工具回源）'),
+    }).description('JSON 卡片兼容'),
     readTool: Schema.object({
       enable: Schema.boolean().default(true).description('是否启用（读取并解析合并转发消息，只提取文本和图片；图片可调用多模态模型生成描述）'),
       name: Schema.string().default('read_forward_msg').description('读取合并转发工具名（提供给 ChatLuna 调用）'),

@@ -11,6 +11,7 @@
 - 支持嵌套解析（可配置最大解析层数）。
 - 支持在读取过程中对图片进行自动描述，输出更适合模型阅读的 JSON。
 - 内置数据库缓存服务，默认按 `message_id` 缓存解析结果 1 天，减少重复请求。
+- 兼容 QQ 以 `json` 卡片（`com.tencent.multimsg`）下发的「合并转发」：自动把卡片里的 `resid` 转成 forward id，引用这类消息时同样可以读取（由 `jsonCard` 配置控制）。
 
 ### 2. 📤 发送合并转发消息
 - 支持以 Bot 身份发送合并转发消息。
@@ -30,6 +31,7 @@
 ## ⚙️ 主要配置
 
 - `protocolService`：协议选择配置。`enableNapcat` 与 `enableLLBot` 必须且只能开启一个，否则会在启动/读取时报错。
+- `jsonCard`：`json` 聊天记录卡片兼容配置（默认开启），关闭后不再把这类卡片转成 forward id。
 - `readTool`：读取转发消息工具配置。
 - `sendTool`：Bot 身份发送工具配置。
 - `fakeTool`：伪造身份发送工具配置。
